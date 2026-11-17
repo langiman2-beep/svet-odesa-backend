@@ -10,22 +10,77 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const API_KEY = process.env.API_KEY;
 
-// Доверяем прокси (нужно для правильной работы через Cloudflare и хостинг)
+// Доверяем прокси (Cloudflare и CityHost), чтобы видеть реальные IP
 app.set("trust proxy", 1);
 
 // Базовая защита заголовков сервера
 app.use(helmet());
 app.use(cors());
 
-// Защита от спама: максимум 30 запросов в минуту с одного реального IP
-const limiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 30,
-  message: { error: "Забагато запитів. Зачекайте хвилину." },
-});
-app.use("/api/", limiter);
+// Хранилище банов: ip -> { until: timestamp, reason: string }
+const banList = new Map();
+const MAX_BAN_ENTRIES = 5000;
 
-// Проверка секретного ключа приложения для всех запросов к /api/
+function addBan(ip, durationMs, reason) {
+  if (banList.size >= MAX_BAN_ENTRIES) {
+    const oldestKey = banList.keys().next().value;
+    banList.delete(oldestKey);
+  }
+  banList.set(ip, { until: Date.now() + durationMs, reason });
+}
+
+// Автоочистка просроченных банов каждые 5 минут (чтобы память не пухла)
+setInterval(
+  () => {
+    const now = Date.now();
+    for (const [ip, data] of banList.entries()) {
+      if (now >= data.until) {
+        banList.delete(ip);
+      }
+    }
+  },
+  5 * 60 * 1000,
+).unref();
+
+// 1. Охранник на входе: проверяем, не сидит ли IP уже в бане
+app.use("/api/", (req, res, next) => {
+  const record = banList.get(req.ip);
+  if (record) {
+    if (Date.now() < record.until) {
+      return res.status(429).json({ error: record.reason });
+    }
+    banList.delete(req.ip);
+  }
+  next();
+});
+
+// 2. Барьер для наглых ботов: > 80 запросов за 10 минут -> бан на 3 часа
+const botBanLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 80,
+  handler: (req, res) => {
+    const msg = "Занадто активний робот. Доступ заблоковано на 3 години.";
+    addBan(req.ip, 3 * 60 * 60 * 1000, msg);
+    res.status(429).json({ error: msg });
+  },
+});
+
+// 3. Барьер для торопыг: > 15 запросов за 1 минуту -> перекур на 10 минут
+const userLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 15,
+  handler: (req, res) => {
+    const msg =
+      "Нема чого так часто тикати оновлення. Перекуріть або попийте чаю 10 хвилин.";
+    addBan(req.ip, 10 * 60 * 1000, msg);
+    res.status(429).json({ error: msg });
+  },
+});
+
+app.use("/api/", botBanLimiter);
+app.use("/api/", userLimiter);
+
+// 4. Пропуск по секретному ключу приложения
 app.use("/api/", (req, res, next) => {
   const clientKey = req.headers["x-api-key"] || req.query.key;
   if (!API_KEY || clientKey !== API_KEY) {
