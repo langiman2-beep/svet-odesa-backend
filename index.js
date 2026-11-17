@@ -149,6 +149,15 @@ app.get("/api/schedule", (req, res) => {
   res.json(getScheduleResponse(group));
 });
 
+// Проверка актуальной версии мобильного приложения
+app.get("/api/version", (req, res) => {
+  res.json({
+    version: "1.0.0",
+    downloadUrl: "https://svet.odesa.org.ua/svet-odesa.apk",
+    notes: "Перший реліз додатку",
+  });
+});
+
 app.listen(PORT, () => {
   console.log(`Сервер запущено на порту/сокеті: ${PORT}`);
 });
