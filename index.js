@@ -10,8 +10,25 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const API_KEY = process.env.API_KEY;
 
-// Доверяем прокси (Cloudflare и CityHost), чтобы видеть реальные IP
-app.set("trust proxy", 1);
+if (!API_KEY) {
+  console.error("[CRITICAL] Переменная API_KEY не задана в .env!");
+}
+
+// Доверяем прокси-цепочке (Cloudflare + внутренний Nginx CityHost)
+app.set("trust proxy", true);
+
+// Надёжное извлечение реального IP клиента за Cloudflare и UNIX-сокетом
+function getClientIp(req) {
+  const cfIp = req.headers["cf-connecting-ip"];
+  if (typeof cfIp === "string" && cfIp.trim()) {
+    return cfIp.trim();
+  }
+  const forwarded = req.headers["x-forwarded-for"];
+  if (typeof forwarded === "string" && forwarded.trim()) {
+    return forwarded.split(",")[0].trim();
+  }
+  return req.ip || "unknown";
+}
 
 // Базовая защита заголовков сервера
 app.use(helmet());
@@ -22,14 +39,15 @@ const banList = new Map();
 const MAX_BAN_ENTRIES = 5000;
 
 function addBan(ip, durationMs, reason) {
-  if (banList.size >= MAX_BAN_ENTRIES) {
+  if (!ip || ip === "unknown") return;
+  if (banList.size >= MAX_BAN_ENTRIES && !banList.has(ip)) {
     const oldestKey = banList.keys().next().value;
     banList.delete(oldestKey);
   }
   banList.set(ip, { until: Date.now() + durationMs, reason });
 }
 
-// Автоочистка просроченных банов каждые 5 минут (чтобы память не пухла)
+// Автоочистка просроченных банов каждые 5 минут
 setInterval(
   () => {
     const now = Date.now();
@@ -42,14 +60,15 @@ setInterval(
   5 * 60 * 1000,
 ).unref();
 
-// 1. Охранник на входе: проверяем, не сидит ли IP уже в бане
+// 1. Охранник на входе: проверяем, не сидит ли реальный IP уже в бане
 app.use("/api/", (req, res, next) => {
-  const record = banList.get(req.ip);
+  const clientIp = getClientIp(req);
+  const record = banList.get(clientIp);
   if (record) {
     if (Date.now() < record.until) {
       return res.status(429).json({ error: record.reason });
     }
-    banList.delete(req.ip);
+    banList.delete(clientIp);
   }
   next();
 });
@@ -58,9 +77,11 @@ app.use("/api/", (req, res, next) => {
 const botBanLimiter = rateLimit({
   windowMs: 10 * 60 * 1000,
   max: 80,
+  keyGenerator: (req) => getClientIp(req),
+  validate: false,
   handler: (req, res) => {
     const msg = "Занадто активний робот. Доступ заблоковано на 3 години.";
-    addBan(req.ip, 3 * 60 * 60 * 1000, msg);
+    addBan(getClientIp(req), 3 * 60 * 60 * 1000, msg);
     res.status(429).json({ error: msg });
   },
 });
@@ -69,10 +90,12 @@ const botBanLimiter = rateLimit({
 const userLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 15,
+  keyGenerator: (req) => getClientIp(req),
+  validate: false,
   handler: (req, res) => {
     const msg =
       "Нема чого так часто тикати оновлення. Перекуріть або попийте чаю 10 хвилин.";
-    addBan(req.ip, 10 * 60 * 1000, msg);
+    addBan(getClientIp(req), 10 * 60 * 1000, msg);
     res.status(429).json({ error: msg });
   },
 });
@@ -82,7 +105,8 @@ app.use("/api/", userLimiter);
 
 // 4. Пропуск по секретному ключу приложения
 app.use("/api/", (req, res, next) => {
-  const clientKey = req.headers["x-api-key"] || req.query.key;
+  const rawKey = req.headers["x-api-key"] || req.query.key;
+  const clientKey = typeof rawKey === "string" ? rawKey : "";
   if (!API_KEY || clientKey !== API_KEY) {
     return res
       .status(401)
@@ -108,7 +132,9 @@ app.get("/api/cities", (req, res) => {
 
 app.get("/api/weather", async (req, res) => {
   try {
-    const cityKey = String(req.query.city || "odesa").slice(0, 20);
+    const rawCity =
+      typeof req.query.city === "string" ? req.query.city : "odesa";
+    const cityKey = rawCity.slice(0, 20);
     const data = await getWeather(cityKey);
     res.json(data);
   } catch (err) {
@@ -117,7 +143,9 @@ app.get("/api/weather", async (req, res) => {
 });
 
 app.get("/api/schedule", (req, res) => {
-  const group = String(req.query.group || "1.1").slice(0, 10);
+  const rawGroup =
+    typeof req.query.group === "string" ? req.query.group : "1.1";
+  const group = rawGroup.slice(0, 10);
   res.json(getScheduleResponse(group));
 });
 

@@ -20,20 +20,34 @@ const GROUPS = [
 const ONE_MINUTE = 60 * 1000;
 const FIFTEEN_MINUTES = 15 * 60 * 1000;
 const ONE_HOUR = 60 * 60 * 1000;
-const STALE_LIMIT = 3 * 60 * 60 * 1000; // 3 часа без обновлений -> тревога в телефон
+const STALE_LIMIT = 3 * 60 * 60 * 1000;
+const FETCH_TIMEOUT = 10 * 1000;
 
 let state = {
   data: null,
-  source: "none", // 'github' | 'telegram' | 'none'
+  source: "none",
   lastSuccessAt: null,
   failCount: 0,
   tgNotice: null,
+  tgUpdatedAt: null,
 };
 
-// 1 контрольный запрос в Telegram
+let workerStarted = false;
+
+function decodeHtmlEntities(str) {
+  return str
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&nbsp;/g, " ");
+}
+
 async function fetchTelegramFallback() {
   const res = await fetch(FALLBACK_TG_URL, {
     headers: { "User-Agent": "Mozilla/5.0" },
+    signal: AbortSignal.timeout(FETCH_TIMEOUT),
   });
   if (!res.ok) throw new Error(`Telegram HTTP ${res.status}`);
 
@@ -46,25 +60,31 @@ async function fetchTelegramFallback() {
   const recentPosts = matches
     .slice(-5)
     .map((m) =>
-      m[1]
-        .replace(/<[^>]+>/g, " ")
-        .replace(/\s+/g, " ")
-        .trim(),
+      decodeHtmlEntities(
+        m[1]
+          .replace(/<br\s*\/?>/gi, "\n")
+          .replace(/<[^>]+>/g, " ")
+          .replace(/\s+/g, " ")
+          .trim(),
+      ),
     )
     .filter((text) => /одес/i.test(text));
 
   return recentPosts.length > 0 ? recentPosts[recentPosts.length - 1] : null;
 }
 
-// Умный цикл опроса с паузой в 1 час при полном отказе
 async function runScheduleCycle() {
   try {
-    const res = await fetch(PRIMARY_URL);
+    const res = await fetch(PRIMARY_URL, {
+      signal: AbortSignal.timeout(FETCH_TIMEOUT),
+    });
     if (!res.ok) throw new Error(`GitHub HTTP ${res.status}`);
 
     const rawJson = await res.json();
+    if (!rawJson || typeof rawJson !== "object" || !rawJson.fact) {
+      throw new Error("Некорректная структура JSON от GitHub");
+    }
 
-    // Всё ок — сохраняем, сбрасываем счётчик и ждём штатные 15 минут
     state.data = rawJson;
     state.source = "github";
     state.lastSuccessAt = Date.now();
@@ -79,20 +99,18 @@ async function runScheduleCycle() {
     state.failCount += 1;
     console.warn(`[DTEK] Сбой GitHub (${state.failCount}/10): ${err.message}`);
 
-    // Если ещё не исчерпали 10 попыток — пробуем снова через 1 минуту
     if (state.failCount < 10) {
       setTimeout(runScheduleCycle, ONE_MINUTE);
       return;
     }
 
-    // 10 попыток провалились -> делаем 1 запрос в Telegram
     console.log("[DTEK] 10 попыток мимо. Делаем 1 запрос в Telegram...");
     try {
       const tgText = await fetchTelegramFallback();
       if (tgText) {
         state.source = "telegram";
         state.tgNotice = tgText;
-        state.lastSuccessAt = Date.now();
+        state.tgUpdatedAt = Date.now();
         console.log("[DTEK] Резерв из Telegram получен.");
       } else {
         console.warn("[DTEK] В Telegram свежих постов по Одессе нет.");
@@ -101,7 +119,6 @@ async function runScheduleCycle() {
       console.error(`[DTEK] Telegram недоступен: ${tgErr.message}`);
     }
 
-    // Сбрасываем счётчик серии и уходим в спячку на 1 час перед новым циклом
     state.failCount = 0;
     console.log("[DTEK] Уходим в паузу на 1 час перед новой серией проверок.");
     setTimeout(runScheduleCycle, ONE_HOUR);
@@ -109,12 +126,13 @@ async function runScheduleCycle() {
 }
 
 function startScheduleWorker() {
+  if (workerStarted) return;
+  workerStarted = true;
   runScheduleCycle();
 }
 
-// Превращаем сырой объект часов {"1": "yes", "2": "no"...} в удобный массив
 function parseDayHours(hoursObj) {
-  if (!hoursObj) return null;
+  if (!hoursObj || typeof hoursObj !== "object") return null;
   const result = [];
   for (let h = 1; h <= 24; h++) {
     const startHour = String(h - 1).padStart(2, "0");
@@ -122,7 +140,7 @@ function parseDayHours(hoursObj) {
     result.push({
       hour: h,
       time: `${startHour}:00 - ${endHour}:00`,
-      status: hoursObj[String(h)] || "unknown", // 'no' | 'yes' | 'first' | 'second' | 'maybe'
+      status: hoursObj[String(h)] || "unknown",
     });
   }
   return result;
@@ -140,25 +158,25 @@ function getScheduleResponse(groupInput = "1.1") {
   let dtekUpdatedAt = null;
 
   if (state.data) {
-    // 1. Разбираем фактические графики (сегодня и завтра)
     const fact = state.data.fact;
-    if (fact && fact.data) {
+    if (fact && fact.data && typeof fact.data === "object") {
       dtekUpdatedAt = fact.update || null;
       const timestamps = Object.keys(fact.data)
         .map(Number)
+        .filter((n) => !Number.isNaN(n))
         .sort((a, b) => a - b);
-      const todayTs = fact.today || timestamps[0];
+
+      const todayTs = Number(fact.today) || timestamps[0];
       const tomorrowTs = timestamps.find((ts) => ts > todayTs);
 
-      if (todayTs && fact.data[todayTs]?.[gpvKey]) {
-        todaySchedule = parseDayHours(fact.data[todayTs][gpvKey]);
+      if (todayTs && fact.data[String(todayTs)]?.[gpvKey]) {
+        todaySchedule = parseDayHours(fact.data[String(todayTs)][gpvKey]);
       }
-      if (tomorrowTs && fact.data[tomorrowTs]?.[gpvKey]) {
-        tomorrowSchedule = parseDayHours(fact.data[tomorrowTs][gpvKey]);
+      if (tomorrowTs && fact.data[String(tomorrowTs)]?.[gpvKey]) {
+        tomorrowSchedule = parseDayHours(fact.data[String(tomorrowTs)][gpvKey]);
       }
     }
 
-    // 2. Разбираем плановый график на неделю (1..7)
     const preset = state.data.preset;
     if (preset && preset.data?.[gpvKey]) {
       weekSchedule = {};
@@ -176,6 +194,9 @@ function getScheduleResponse(groupInput = "1.1") {
     dtekUpdatedAt,
     lastSuccessAt: state.lastSuccessAt
       ? new Date(state.lastSuccessAt).toISOString()
+      : null,
+    tgUpdatedAt: state.tgUpdatedAt
+      ? new Date(state.tgUpdatedAt).toISOString()
       : null,
     isStale,
     warningMessage: isStale
