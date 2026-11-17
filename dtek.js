@@ -146,6 +146,16 @@ function parseDayHours(hoursObj) {
   return result;
 }
 
+// Получаем дату YYYY-MM-DD по киевскому времени для любого timestamp (в секундах или мс)
+function getKyivDateStr(ms) {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/Kyiv",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date(ms));
+}
+
 function getScheduleResponse(groupInput = "1.1") {
   const isStale =
     !state.lastSuccessAt || Date.now() - state.lastSuccessAt > STALE_LIMIT;
@@ -166,7 +176,12 @@ function getScheduleResponse(groupInput = "1.1") {
         .filter((n) => !Number.isNaN(n))
         .sort((a, b) => a - b);
 
-      const todayTs = Number(fact.today) || timestamps[0];
+      const nowKyivDate = getKyivDateStr(Date.now());
+      const matchedTodayTs = timestamps.find(
+        (ts) => getKyivDateStr(ts * 1000) === nowKyivDate,
+      );
+
+      const todayTs = matchedTodayTs || Number(fact.today) || timestamps[0];
       const tomorrowTs = timestamps.find((ts) => ts > todayTs);
 
       if (todayTs && fact.data[String(todayTs)]?.[gpvKey]) {
@@ -191,6 +206,7 @@ function getScheduleResponse(groupInput = "1.1") {
     selectedGroup: group,
     groups: GROUPS,
     source: state.source,
+    updatedAt: dtekUpdatedAt,
     dtekUpdatedAt,
     lastSuccessAt: state.lastSuccessAt
       ? new Date(state.lastSuccessAt).toISOString()

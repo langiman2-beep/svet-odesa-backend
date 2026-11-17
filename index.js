@@ -17,7 +17,6 @@ if (!API_KEY) {
 // Доверяем прокси-цепочке (Cloudflare + внутренний Nginx CityHost)
 app.set("trust proxy", true);
 
-// Надёжное извлечение реального IP клиента за Cloudflare и UNIX-сокетом
 function getClientIp(req) {
   const cfIp = req.headers["cf-connecting-ip"];
   if (typeof cfIp === "string" && cfIp.trim()) {
@@ -30,7 +29,6 @@ function getClientIp(req) {
   return req.ip || "unknown";
 }
 
-// Базовая защита заголовков сервера
 app.use(helmet());
 app.use(cors());
 
@@ -47,7 +45,6 @@ function addBan(ip, durationMs, reason) {
   banList.set(ip, { until: Date.now() + durationMs, reason });
 }
 
-// Автоочистка просроченных банов каждые 5 минут
 setInterval(
   () => {
     const now = Date.now();
@@ -60,7 +57,7 @@ setInterval(
   5 * 60 * 1000,
 ).unref();
 
-// 1. Охранник на входе: проверяем, не сидит ли реальный IP уже в бане
+// 1. Проверяем, не сидит ли IP уже в бане
 app.use("/api/", (req, res, next) => {
   const clientIp = getClientIp(req);
   const record = banList.get(clientIp);
@@ -73,30 +70,30 @@ app.use("/api/", (req, res, next) => {
   next();
 });
 
-// 2. Барьер для наглых ботов: > 80 запросов за 10 минут -> бан на 3 часа
+// 2. Жёсткий барьер от DDoS: > 400 запросов за 10 минут -> бан на 1 час
 const botBanLimiter = rateLimit({
   windowMs: 10 * 60 * 1000,
-  max: 80,
-  keyGenerator: (req) => getClientIp(req),
-  validate: false,
-  handler: (req, res) => {
-    const msg = "Занадто активний робот. Доступ заблоковано на 3 години.";
-    addBan(getClientIp(req), 3 * 60 * 60 * 1000, msg);
-    res.status(429).json({ error: msg });
-  },
-});
-
-// 3. Барьер для торопыг: > 15 запросов за 1 минуту -> перекур на 10 минут
-const userLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 15,
+  max: 400,
   keyGenerator: (req) => getClientIp(req),
   validate: false,
   handler: (req, res) => {
     const msg =
-      "Нема чого так часто тикати оновлення. Перекуріть або попийте чаю 10 хвилин.";
-    addBan(getClientIp(req), 10 * 60 * 1000, msg);
+      "Занадто висока активність з вашої мережі. Тимчасове обмеження на 1 годину.";
+    addBan(getClientIp(req), 60 * 60 * 1000, msg);
     res.status(429).json({ error: msg });
+  },
+});
+
+// 3. Мягкий лимит (с запасом под общий мобильный IP оператора): 90 запросов в минуту без длительного бана
+const userLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 90,
+  keyGenerator: (req) => getClientIp(req),
+  validate: false,
+  handler: (req, res) => {
+    res.status(429).json({
+      error: "Забагато запитів за хвилину. Зачекайте трохи та спробуйте знову.",
+    });
   },
 });
 
@@ -115,7 +112,6 @@ app.use("/api/", (req, res, next) => {
   next();
 });
 
-// Запускаем фоновый опрос графиков ДТЭК
 startScheduleWorker();
 
 app.get("/", (req, res) => {
@@ -149,7 +145,6 @@ app.get("/api/schedule", (req, res) => {
   res.json(getScheduleResponse(group));
 });
 
-// Проверка актуальной версии мобильного приложения
 app.get("/api/version", (req, res) => {
   res.json({
     version: "1.0.0",
