@@ -133,7 +133,7 @@ app.get("/api/version", (req, res) => {
   res.json({
     version: "1.0.1",
     buildNumber: 2,
-    downloadUrl: "https://svet.odesa.org.ua/svet-odesa.apk",
+    downloadUrl: "https://downloads.odesa.org.ua/svet-odesa.apk",
     notes:
       "Виправлено завантаження графіків і погоди, додано автооновлення за номером збірки.",
   });
