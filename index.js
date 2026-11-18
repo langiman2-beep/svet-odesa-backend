@@ -8,11 +8,6 @@ const { startScheduleWorker, getScheduleResponse } = require("./dtek");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const API_KEY = process.env.API_KEY;
-
-if (!API_KEY) {
-  console.error("[CRITICAL] Переменная API_KEY не задана в .env!");
-}
 
 // Доверяем прокси-цепочке (Cloudflare + внутренний Nginx CityHost)
 app.set("trust proxy", true);
@@ -84,7 +79,7 @@ const botBanLimiter = rateLimit({
   },
 });
 
-// 3. Мягкий лимит (с запасом под общий мобильный IP оператора): 90 запросов в минуту без длительного бана
+// 3. Мягкий лимит: 90 запросов в минуту без длительного бана
 const userLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 90,
@@ -99,18 +94,6 @@ const userLimiter = rateLimit({
 
 app.use("/api/", botBanLimiter);
 app.use("/api/", userLimiter);
-
-// 4. Пропуск по секретному ключу приложения
-app.use("/api/", (req, res, next) => {
-  const rawKey = req.headers["x-api-key"] || req.query.key;
-  const clientKey = typeof rawKey === "string" ? rawKey : "";
-  if (!API_KEY || clientKey !== API_KEY) {
-    return res
-      .status(401)
-      .json({ error: "Доступ заборонено: невірний ключ API" });
-  }
-  next();
-});
 
 startScheduleWorker();
 
@@ -145,11 +128,14 @@ app.get("/api/schedule", (req, res) => {
   res.json(getScheduleResponse(group));
 });
 
+// Когда выкладываешь новый APK на сервер, просто меняй тут version и buildNumber
 app.get("/api/version", (req, res) => {
   res.json({
-    version: "1.0.0",
+    version: "1.0.1",
+    buildNumber: 2,
     downloadUrl: "https://svet.odesa.org.ua/svet-odesa.apk",
-    notes: "Перший реліз додатку",
+    notes:
+      "Виправлено завантаження графіків і погоди, додано автооновлення за номером збірки.",
   });
 });
 
