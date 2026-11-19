@@ -131,11 +131,11 @@ app.get("/api/schedule", (req, res) => {
 // Когда выкладываешь новый APK на сервер, просто меняй тут version и buildNumber
 app.get("/api/version", (req, res) => {
   res.json({
-    version: "1.0.1",
-    buildNumber: 2,
+    version: "1.0.2",
+    buildNumber: 4,
     downloadUrl: "https://downloads.odesa.org.ua/svet-odesa.apk",
     notes:
-      "Виправлено завантаження графіків і погоди, додано автооновлення за номером збірки.",
+      "Стабілізовано фонове оновлення графіків та своєчасні сповіщення (додано налаштування роботи у фоні).",
   });
 });
 
